@@ -185,10 +185,22 @@ class Analysis:
         d = loop.to_domain().forget_ancillas(len(discarded))
 
         # Project the temporary variables and compute Kleene closure
+        # TODO: Consider the starting state when computing the Kleene closure?
         summary = d.project_tmps().kleene_closure()
 
+        # Expand vocabulary to the full set of qubits
+        # TODO: Replace with numpy magic
+        summary_full = GF2.Zeros((self.num_qubits, 2 * self.num_qubits + 1))
+        for q in range(self.num_qubits):
+            if q in qs:
+                row = qs.index(q)
+                cols = qs + [self.num_qubits + q for q in qs] + [-1]
+                summary_full[row, cols] = summary.rel[q]
+            else:
+                summary_full[q, q] = summary_full[q, self.num_qubits + q] = 1
+
         # Fast-forward the current state with the summary
-        self.equation = self.to_domain().compose_ff(summary)
+        self.equation = self.to_domain().compose_ff(Domain(summary_full, self.num_qubits))
         return qs
 
 
