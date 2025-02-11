@@ -9,7 +9,7 @@ from galois import GF2
 import numpy as np
 
 from hugr import Node, Hugr, Wire, OutPort
-from hugr import ops
+from hugr import ops, tys
 
 from hugr.build.dfg import DfBase
 
@@ -25,7 +25,7 @@ QubitId: TypeAlias = int
 @dataclass
 class Term:
     equation: GF2
-    phase_gates: set[tuple[Node, bool]]
+    phase_gates: list[tuple[Node, bool]]
 
 
 @dataclass
@@ -65,24 +65,12 @@ class Analysis:
         self.terms = {}
 
     @staticmethod
-    def run(hugr: Hugr, parent: Node) -> Analysis:
+    def run(hugr: Hugr, parent: Node) -> tuple[Analysis, list[QubitId]]:
         inp, *_ = hugr.children(parent)
-        qs = {wire: i for i, (wire, _) in enumerate(hugr.outgoing_links(inp))}
+        qs = list(range(len(list(outgoing_qubits(inp, hugr)))))
         analysis = Analysis(len(qs), hugr)
-        for node in toposort(hugr, parent):
-            match hugr[node].op:
-                case ops.Custom(extension="tket2.quantum", op_name=name):
-                    analysis.apply_gate(
-                        name, [qs[wire] for _, [wire] in hugr.incoming_links(node)], node
-                    )
-                case ops.TailLoop():
-                    pass
-
-            # Update tracked wires
-            for (_, [in_wire]), (out_wire, _) in zip(hugr.incoming_links(node), hugr.outgoing_links(node)):
-                qs[out_wire] = qs[in_wire]
-
-        return analysis
+        outs = analysis.apply_dfg(qs, parent)
+        return analysis, outs
 
     def to_domain(self) -> Domain:
         """Turns the gathered information into an instance of our domain."""
@@ -90,7 +78,20 @@ class Analysis:
         rel = np.hstack((GF2.Identity(self.num_qubits), self.equation))
         return Domain(rel, self.num_qubits)
 
-    def new_var(self) -> int:
+    def new_qubit(self) -> int:
+        # Insert a new column
+        columns = (
+            self.equation[:, :self.num_qubits],
+            GF2.Zeros([self.num_qubits, 1]),
+            self.equation[:, self.num_qubits:],
+        )
+        # Qubit allocated in zero state, so the new row should be all zeroes
+        new_row = GF2.Zeros([1, self.num_qubits + self.num_tmps + 2])
+        self.equation = np.vstack((np.hstack(columns), new_row))
+        self.num_qubits += 1
+        return self.num_qubits - 1
+
+    def new_tmp(self) -> int:
         inserted = (
             self.equation[:, :-1],
             GF2.Zeros([self.num_qubits, 1]),
@@ -101,15 +102,19 @@ class Analysis:
         return self.num_qubits + self.num_tmps - 1
 
     def add_tern(self, q: QubitId, loc: Node) -> None:
-        eq = self.equation[q, 1:]
+        eq = self.equation[q, :-1]
         parity = self.equation[q, 0]
         if eq.tobytes() not in self.terms:
-            self.terms[eq.tobytes()] = Term(eq, {(loc, parity)})
+            self.terms[eq.tobytes()] = Term(eq, [(loc, parity)])
         else:
-            self.terms[eq.tobytes()].phase_gates.add((loc, parity))
+            self.terms[eq.tobytes()].phase_gates.append((loc, parity))
 
-    def apply_gate(self, op: str, qs: list[QubitId], loc: Node) -> None:
+    def apply_quantum_op(self, op: str, qs: list[QubitId], loc: Node) -> list[QubitId]:
         match op, qs:
+            case "QAlloc", []:
+                return [self.new_qubit()]
+            case "Measure" | "QFree", [_]:
+                return []
             case "Reset", [q]:
                 self.equation[q] = 0
             case "X", [q]:
@@ -120,28 +125,71 @@ class Analysis:
                 self.add_tern(q, loc)
             case _, qs:
                 for q in qs:
-                    y = self.new_var()
+                    y = self.new_tmp()
                     self.equation[q] = 0
                     self.equation[q, y] = 1
+        return qs
 
-    def apply_loop(self, node: Node) -> None:
-        loop = Analysis.run(self.hugr, node)
+    def apply_dfg(self, qs: list[QubitId], parent: Node) -> list[QubitId]:
+        hugr = self.hugr
+        inp, *_ = hugr.children(parent)
+        id_of = dict(zip(outgoing_qubits(inp, hugr), qs))
+        wire_of = dict(zip(qs, outgoing_qubits(inp, hugr)))
 
-        # Check if any phase gates depend only on variables that remain static between
-        # loop input and output
-        # for term in loop.terms.values():
-        #     for v in np.where(term.equation == 1):
-        #         is_tmp =
+        for node in toposort(hugr, parent):
+            in_ids = [id_of[wire] for wire in incoming_qubits(node, hugr)]
+            out_ids = []
+            match hugr[node].op:
+                case ops.Custom(extension="tket2.quantum", op_name=name):
+                    out_ids = self.apply_quantum_op(name, in_ids, node)
+                case ops.TailLoop():
+                    out_ids = self.apply_loop(node, qs)
+                case ops.Output():
+                    outputs = in_ids
 
+            # Update tracked wires
+            for out_wire, out_id in zip(outgoing_qubits(node, hugr), out_ids):
+                id_of[out_wire] = out_id
+                wire_of[out_id] = out_wire
 
-        # Project out the temporary variables and compute Kleene closure
-        summary = loop_ctx.to_domain().project_tmps().kleene_closure()
-        # Reduce the loop terms w.r.t. to the new closure relation
+        return outputs
+
+    def apply_loop(self, node: Node, qs: list[QubitId]) -> list[QubitId]:
+        loop, continue_vars = Analysis.run(self.hugr, node)
+
+        # Linearity ensures that the loop has the same number of qubits that go around
+        # in each iteration and eventually outputted
+        assert len(continue_vars) == len(qs)
+        # However, there might be allocations and matching deallocations in the loop
+        discarded = [q for q in range(loop.num_qubits) if q not in continue_vars]
+
+        # Apply permutation such that the qubits needed for the next iteration are back
+        # in the original first rows and discarded ones at the end
+        loop.equation[:] = loop.equation[continue_vars + discarded]
+
+        # Check if any phase gates in the loop depend only on variables that remain
+        # static between iterations. Those may be hoisted out of the loop later on
+        hoistable = []
+        for term in loop.terms.values():
+            # Find variables that influence this gate (excluding the parity bit)
+            vs, = term.equation.nonzero()
+            # We can't do anything if it depends on ancillas or temporaries
+            if any(v >= loop.num_qubits for v in vs):
+                continue
+            # Check if all of those qubits are returned to their original state for the
+            # next iteration
+            if all(np.array_equal(np.where(loop.equation[v] == 1), np.array([[v]])) for v in vs):
+                hoistable.append(term)
+
+        # Project the discarded qubits
+        d = loop.to_domain().forget_ancillas(len(discarded))
+
+        # Project the temporary variables and compute Kleene closure
+        summary = d.project_tmps().kleene_closure()
+
         # Fast-forward the current state with the summary
-        rel = self.to_domain().compose_ff(summary)
-
-
-
+        self.equation = self.to_domain().compose_ff(summary)
+        return qs
 
 
 
@@ -176,6 +224,13 @@ class Domain:
     def c(self) -> GF2:
         return self.rel[:, -1:]
 
+    def forget_ancillas(self, count: int) -> Domain:
+        """Stops tracking of the last `count` qubits by turning them into temporary
+        variables.
+        """
+        rel = project(self.rel, self.num_qubits - count, self.num_qubits)
+        return Domain(rel, self.num_qubits - count)
+
     def project_tmps(self) -> Domain:
         rel = project(self.rel, 2 * self.num_qubits, self.dim - 1)
         return Domain(rel, self.num_qubits)
@@ -187,7 +242,7 @@ class Domain:
         # Where the projection is over the left block. See bottom of p. 14.
         assert self.dim == other.dim
         a, b = self.rel, other.rel
-        block = np.hstack((np.vstack((a, b)), np.vstack((a, GF2.Zeros(a.shape)))))
+        block = np.hstack((np.vstack((a, b)), np.vstack((a, GF2.Zeros((b.shape[0], a.shape[1]))))))
         return Domain(project(block, 0, self.dim), self.num_qubits)
 
     def compose(self, other: Domain) -> Domain:
@@ -309,9 +364,23 @@ def project(a: GF2, start: int, stop: int) -> GF2:
     return a[np.all(a[:, :stop-start] == 0, axis=1), stop-start:]
 
 
+def project_columns(a: GF2, cols: list[int]) -> GF2:
+    """Projects discontinuous columns out of a relation."""
+    # Permute matrix to move the columns that should be projected out to the front
+    col_set = set(cols)
+    assert len(col_set) == len(cols)
+    other_cols = [i for i in range(a.shape[1]) if i not in col_set]
+    a = np.hstack((a[:, cols], a[:, other_cols]))
+    # Computing the reduced row echelon form
+    a = a.row_reduce()
+    # Any rows where one of the projection columns is non-zero can be removed (since
+    # those rows can be solved by fixing one of the projected values)
+    return a[np.all(a[:, :len(cols)] == 0, axis=1), len(cols):]
+
+
+
 def toposort(hugr: Hugr, parent: Node) -> Iterator[Node]:
-    inp, *_ = hugr.children(parent)
-    queue = {inp}
+    queue = {node for node in hugr.children(parent) if hugr.num_incoming(node) == 0}
     visited = set()
     while queue:
         node = queue.pop()
@@ -319,9 +388,23 @@ def toposort(hugr: Hugr, parent: Node) -> Iterator[Node]:
         visited.add(node)
         for _, succs in hugr.outgoing_links(node):
             for succ in succs:
-                if all(pred.node in visited for pred, _ in hugr.incoming_links(node)):
+                if all(pred.node in visited for _, [pred] in hugr.incoming_links(succ.node)):
                     queue.add(succ.node)
 
 
+def incoming_qubits(node: Node, hugr: Hugr) -> Iterator[Wire]:
+    return (
+        wire
+        for _, [wire] in hugr.incoming_links(node)
+        if hugr.port_type(wire) == tys.Qubit
+    )
+
+
+def outgoing_qubits(node: Node, hugr: Hugr) -> Iterator[Wire]:
+    return (
+        wire
+        for (wire, _) in hugr.outgoing_links(node)
+        if hugr.port_type(wire) == tys.Qubit
+    )
 
 
