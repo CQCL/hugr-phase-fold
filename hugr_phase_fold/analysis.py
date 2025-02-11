@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TypeAlias, NamedTuple
 
 from galois import GF2
 
@@ -18,19 +19,29 @@ from tket2_exts import quantum as quantum_ext
 quantum = quantum_ext()
 
 
-
 QubitId: TypeAlias = int
 
 
-@dataclass
-class Term:
-    equation: GF2
-    phase_gates: list[tuple[Node, bool]]
+HashableGF2Vec = tuple[bool, ...]
+
+
+#: A phase
+Phase: TypeAlias = "SimplePhase | LoopHoistedPhase"
+
+
+class SimplePhase(NamedTuple):
+    node: Node
+    parity: bool
+
+
+class LoopHoistedPhase(NamedTuple):
+    loop_node: Node
+    to_hoist: list[Phase]
+    inner_eqn: GF2
 
 
 @dataclass
 class Analysis:
-
     #: Affine equations describing the current state of each qubit x'_i as a function of
     #: the initial states x_j, intermediate variables y_j, and an offset bit c. E.g.
     #:
@@ -46,8 +57,12 @@ class Analysis:
     #: In other words, it's a GF2 matrix of shape [qubits, qubits + intermediates + 1].
     equation: GF2
 
-    # Mapping from
-    terms: dict[bytes, Term]
+    #: Mapping from affine equations to phases that act on those states. This map only
+    #: includes phases of nodes that act in the current DFG or ones that can be hoisted
+    #: into it.
+    phases: defaultdict[HashableGF2Vec, list[Phase]]
+
+    nested_analysis: dict[Node, Analysis]
 
     hugr: Hugr
 
@@ -59,10 +74,9 @@ class Analysis:
         self.num_tmps = 0
         self.hugr = hugr
         # Initialise as [ I | 0 ], i.e. `x_i' = x_i` for all i
-        self.equation = np.hstack(
-            (GF2.Identity(num_qubits), GF2.Zeros((num_qubits, 1)))
-        )
-        self.terms = {}
+        self.equation = np.hstack((GF2.Identity(num_qubits), GF2.Zeros((num_qubits, 1))))
+        self.phases = defaultdict(list)
+        self.nested_analysis = {}
 
     @staticmethod
     def run(hugr: Hugr, parent: Node) -> tuple[Analysis, list[QubitId]]:
@@ -81,9 +95,9 @@ class Analysis:
     def new_qubit(self) -> int:
         # Insert a new column
         columns = (
-            self.equation[:, :self.num_qubits],
+            self.equation[:, : self.num_qubits],
             GF2.Zeros([self.num_qubits, 1]),
-            self.equation[:, self.num_qubits:],
+            self.equation[:, self.num_qubits :],
         )
         # Qubit allocated in zero state, so the new row should be all zeroes
         new_row = GF2.Zeros([1, self.num_qubits + self.num_tmps + 2])
@@ -101,13 +115,10 @@ class Analysis:
         self.num_tmps += 1
         return self.num_qubits + self.num_tmps - 1
 
-    def add_tern(self, q: QubitId, loc: Node) -> None:
-        eq = self.equation[q, :-1]
+    def add_simple_phase(self, q: QubitId, loc: Node) -> None:
+        eqn = self.equation[q, :-1]
         parity = self.equation[q, 0]
-        if eq.tobytes() not in self.terms:
-            self.terms[eq.tobytes()] = Term(eq, [(loc, parity)])
-        else:
-            self.terms[eq.tobytes()].phase_gates.append((loc, parity))
+        self.phases[as_tuple(eqn)].append(SimplePhase(loc, parity))
 
     def apply_quantum_op(self, op: str, qs: list[QubitId], loc: Node) -> list[QubitId]:
         match op, qs:
@@ -122,7 +133,7 @@ class Analysis:
             case "CX", [q1, q2]:
                 self.equation[q2] += self.equation[q1]
             case "T", [q]:
-                self.add_tern(q, loc)
+                self.add_simple_phase(q, loc)
             case _, qs:
                 for q in qs:
                     y = self.new_tmp()
@@ -170,16 +181,18 @@ class Analysis:
         # Check if any phase gates in the loop depend only on variables that remain
         # static between iterations. Those may be hoisted out of the loop later on
         hoistable = []
-        for term in loop.terms.values():
+        for eqn_tuple, phases in loop.phases.items():
             # Find variables that influence this gate (excluding the parity bit)
-            vs, = term.equation.nonzero()
-            # We can't do anything if it depends on ancillas or temporaries
-            if any(v >= loop.num_qubits for v in vs):
-                continue
-            # Check if all of those qubits are returned to their original state for the
-            # next iteration
-            if all(np.array_equal(np.where(loop.equation[v] == 1), np.array([[v]])) for v in vs):
-                hoistable.append(term)
+            eqn = GF2(eqn_tuple)
+            (vs,) = eqn.nonzero()
+            # We can only hoist if it doesn't depend on ancillas or temporaries.
+            if all(v < loop.num_qubits for v in vs) and all(
+                # We also need to check if all of those qubits are returned to their
+                # original state for the next iteration
+                np.array_equal(np.where(loop.equation[v] == 1), np.array([[v]]))
+                for v in vs
+            ):
+                hoistable.append(eqn_tuple)
 
         # Project the discarded qubits
         d = loop.to_domain().forget_ancillas(len(discarded))
@@ -190,19 +203,41 @@ class Analysis:
 
         # Expand vocabulary to the full set of qubits
         # TODO: Replace with numpy magic
-        summary_full = GF2.Zeros((self.num_qubits, 2 * self.num_qubits + 1))
-        for q in range(self.num_qubits):
-            if q in qs:
-                row = qs.index(q)
-                cols = qs + [self.num_qubits + q for q in qs] + [-1]
-                summary_full[row, cols] = summary.rel[q]
-            else:
-                summary_full[q, q] = summary_full[q, self.num_qubits + q] = 1
+        missing_qubits = [q for q in range(self.num_qubits) if q not in qs]
+        num_rows = summary.rel.shape[0]
+        summary_full = GF2.Zeros((num_rows + len(missing_qubits), 2 * self.num_qubits + 1))
+        for i in range(num_rows):
+            cols = qs + [self.num_qubits + q for q in qs] + [-1]
+            summary_full[i, cols] = summary.rel[i]
+        for i, q in enumerate(missing_qubits):
+            summary_full[num_rows + i, q] = summary_full[num_rows + i, self.num_qubits + q] = 1
 
-        # Fast-forward the current state with the summary
+        # Fast-forward the current state with the summary. This may introduce new
+        # temporary variables into the current state.
         self.equation = self.to_domain().compose_ff(Domain(summary_full, self.num_qubits))
-        return qs
 
+        # Update previous stored phase equations to include the new temporaries
+        # TODO: We're assume that we only added new temporaries and none were removed.
+        #   Is that a safe assumption??
+        phases_ff = defaultdict(list)
+        for eqn, phases in self.phases.items():
+            eqn_ff = GF2.Zeros(self.equation.shape[1] - 1)
+            eqn_ff[:len(eqn)] = eqn
+            phases_ff[as_tuple(eqn_ff)] = phases
+        self.phases = phases_ff
+
+        # Add hoisted phases
+        for eqn in hoistable:
+            # Remove the equation from the inner loop context
+            phases = loop.phases.pop(eqn)
+            # Express the equation in terms of the global vocabulary
+            eqn_ff = GF2.Zeros(self.equation.shape[1] - 1)
+            eqn_ff[:len(eqn)] = eqn
+            self.phases[as_tuple(eqn_ff)].append(LoopHoistedPhase(node, phases, eqn))
+
+        # Finally, store the nested analysis with the remaining unhoisted phases
+        self.nested_analysis[node] = loop
+        return qs
 
 
 @dataclass
@@ -222,15 +257,15 @@ class Domain:
 
     @property
     def pre(self) -> GF2:
-        return self.rel[:, self.num_qubits:2*self.num_qubits]
+        return self.rel[:, self.num_qubits : 2 * self.num_qubits]
 
     @property
     def post(self) -> GF2:
-        return self.rel[:, :self.num_qubits]
+        return self.rel[:, : self.num_qubits]
 
     @property
     def tmp(self) -> GF2:
-        return self.rel[:, 2*self.num_qubits:-1]
+        return self.rel[:, 2 * self.num_qubits : -1]
 
     @property
     def c(self) -> GF2:
@@ -348,7 +383,7 @@ class Domain:
         res = block[:n]
         # Reshape it into [ X | Y | c ] to be compatible with the context and try to
         # purge zero columns from Y (those correspond to unused temporaries)
-        x, y, c = res[:, -n-1:-1], res[:, n:-n-1], res[:, -1:]
+        x, y, c = res[:, -n - 1 : -1], res[:, n : -n - 1], res[:, -1:]
         y = y[:, np.any(y != 0, axis=0)]
         return np.hstack((x, y, c))
 
@@ -359,7 +394,6 @@ class Domain:
             if np.array_equal(a.rel, b.rel):
                 return b
             a = b
-
 
 
 def project(a: GF2, start: int, stop: int) -> GF2:
@@ -373,7 +407,7 @@ def project(a: GF2, start: int, stop: int) -> GF2:
     a = a.row_reduce()
     # Any rows where one of the projection columns is non-zero can be removed (since
     # those rows can be solved by fixing one of the projected values)
-    return a[np.all(a[:, :stop-start] == 0, axis=1), stop-start:]
+    return a[np.all(a[:, : stop - start] == 0, axis=1), stop - start :]
 
 
 def project_columns(a: GF2, cols: list[int]) -> GF2:
@@ -387,8 +421,7 @@ def project_columns(a: GF2, cols: list[int]) -> GF2:
     a = a.row_reduce()
     # Any rows where one of the projection columns is non-zero can be removed (since
     # those rows can be solved by fixing one of the projected values)
-    return a[np.all(a[:, :len(cols)] == 0, axis=1), len(cols):]
-
+    return a[np.all(a[:, : len(cols)] == 0, axis=1), len(cols) :]
 
 
 def toposort(hugr: Hugr, parent: Node) -> Iterator[Node]:
@@ -405,18 +438,12 @@ def toposort(hugr: Hugr, parent: Node) -> Iterator[Node]:
 
 
 def incoming_qubits(node: Node, hugr: Hugr) -> Iterator[Wire]:
-    return (
-        wire
-        for _, [wire] in hugr.incoming_links(node)
-        if hugr.port_type(wire) == tys.Qubit
-    )
+    return (wire for _, [wire] in hugr.incoming_links(node) if hugr.port_type(wire) == tys.Qubit)
 
 
 def outgoing_qubits(node: Node, hugr: Hugr) -> Iterator[Wire]:
-    return (
-        wire
-        for (wire, _) in hugr.outgoing_links(node)
-        if hugr.port_type(wire) == tys.Qubit
-    )
+    return (wire for (wire, _) in hugr.outgoing_links(node) if hugr.port_type(wire) == tys.Qubit)
 
 
+def as_tuple(xs: GF2) -> tuple[bool, ...]:
+    return tuple(x.item() for x in xs)
