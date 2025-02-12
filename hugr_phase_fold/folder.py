@@ -129,15 +129,17 @@ class PhaseFolder:
 
     @remove_and_acc.register
     def _remove_and_acc_simple_phase(
-        self, phase: SimplePhase, acc: PhaseAccumulator
+        self, phase: SimplePhase, acc: PhaseAccumulator, parity: bool = False
     ) -> PhaseAccumulator:
         parent = self.hugr[phase.node].parent
         remove_gate(phase.node, self.hugr)
-        return acc.add_phase(phase.angle, self.hugr, parent, negate=bool(phase.parity))
+        return acc.add_phase(
+            phase.angle, self.hugr, parent, negate=parity ^ bool(phase.parity)
+        )
 
     @remove_and_acc.register
     def _remove_and_acc_loop_hoisted_phase(
-        self, phase: LoopHoistedPhase, acc: PhaseAccumulator
+        self, phase: LoopHoistedPhase, acc: PhaseAccumulator, parity: bool = False
     ) -> PhaseAccumulator:
         loop = self.hugr[phase.loop_node]
 
@@ -165,7 +167,9 @@ class PhaseFolder:
         # Visit the inside of the loop
         nested_acc = DynamicPhaseAccumulator(nested_acc_wire, force_dynamic=True)
         for inner in phase.to_hoist:
-            nested_acc = self.remove_and_acc(inner, nested_acc)
+            nested_acc = self.remove_and_acc(
+                inner, nested_acc, parity ^ bool(phase.parity)
+            )
 
         # Add accumulator as an extra loop output
         assert isinstance(nested_acc, DynamicPhaseAccumulator)

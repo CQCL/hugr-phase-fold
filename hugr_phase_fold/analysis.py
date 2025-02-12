@@ -42,6 +42,7 @@ class LoopHoistedPhase(NamedTuple):
     loop_node: Node
     to_hoist: list[Phase]
     inner_eqn: GF2
+    parity: bool
 
 
 @dataclass
@@ -240,7 +241,9 @@ class Analysis:
             eqn_full[qs] = eqn
             # Canonicalize the equation w.r.t the outer relation
             eqn_ff, parity = d.canonicalize(eqn_full)
-            self.phases[as_tuple(eqn_ff)].append(LoopHoistedPhase(node, phases, eqn))
+            self.phases[as_tuple(eqn_ff)].append(
+                LoopHoistedPhase(node, phases, eqn, parity)
+            )
 
         # Finally, store the nested analysis with the remaining unhoisted phases
         self.nested_analysis[node] = loop
@@ -422,7 +425,7 @@ class Domain:
             block[-1, -self.num_qubits - 1:-1],
             block[-1, self.num_qubits:-self.num_qubits - 1]
         )
-        return np.concatenate(new_eqn), block[0, -1]
+        return np.concatenate(new_eqn), block[-1, -1]
 
 
 def project(a: GF2, start: int, stop: int) -> GF2:
