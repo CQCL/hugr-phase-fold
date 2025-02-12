@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Protocol
 
-from hugr import Wire, Hugr, Node, ops
+from hugr import Wire, Hugr, Node, ops, tys
 from hugr.std.float import FLOAT_OPS_EXTENSION, FLOAT_T
 
 from hugr_phase_fold.analysis import Phase, SimplePhase, LoopHoistedPhase, Analysis
@@ -23,12 +23,14 @@ S = OneQbGate("S")
 Sdg = OneQbGate("Sdg")
 T = OneQbGate("T")
 
+FNeg = FLOAT_OPS_EXTENSION.get_op("fneg").instantiate([])
 FAdd = FLOAT_OPS_EXTENSION.get_op("fadd").instantiate([])
+FSub = FLOAT_OPS_EXTENSION.get_op("fsub").instantiate([])
 
 
 class PhaseAccumulator(Protocol):
     def add_phase(
-        self, angle: Fraction | Wire, hugr: Hugr, parent: Node
+        self, angle: Fraction | Wire, hugr: Hugr, parent: Node, negate: bool = False
     ) -> PhaseAccumulator: ...
 
     def to_wire(self, parent: Node, hugr: Hugr) -> Wire: ...
@@ -39,11 +41,17 @@ class StaticPhaseAccumulator(PhaseAccumulator):
     angle: Fraction = field(default_factory=Fraction)
 
     def add_phase(
-        self, angle: Fraction | Wire, hugr: Hugr, parent: Node
+        self, angle: Fraction | Wire, hugr: Hugr, parent: Node, negate: bool = False
     ) -> PhaseAccumulator:
         if isinstance(angle, Fraction):
+            if negate:
+                angle = -angle
             return StaticPhaseAccumulator(self.angle + angle)
         else:
+            if negate:
+                neg = hugr.add_node(FNeg, parent, 1)
+                hugr.add_link(angle.out_port(), neg.inp(0))
+                angle = neg.out(0)
             return DynamicPhaseAccumulator(angle, self.angle)
 
     def to_wire(self, parent: Node, hugr: Hugr) -> Wire:
@@ -57,20 +65,26 @@ class DynamicPhaseAccumulator(PhaseAccumulator):
     force_dynamic: bool = False
 
     def add_phase(
-        self, angle: Fraction | Wire, hugr: Hugr, parent: Node
+        self, angle: Fraction | Wire, hugr: Hugr, parent: Node, negate: bool = False
     ) -> PhaseAccumulator:
-        if isinstance(angle, Fraction) and self.force_dynamic:
-            angle = load_float_const(angle.numerator / angle.denominator, parent, hugr)
         if isinstance(angle, Fraction):
-            return DynamicPhaseAccumulator(
-                self.wire, self.static_angle + angle, self.force_dynamic
-            )
+            if self.force_dynamic:
+                if negate:
+                    angle = -angle
+                angle_float = angle.numerator / angle.denominator
+                angle = load_float_const(angle_float, parent, hugr)
+                return self.add_phase(angle, hugr, parent, negate)
+            else:
+                return DynamicPhaseAccumulator(
+                    self.wire, self.static_angle + angle, self.force_dynamic
+                )
         else:
-            add = hugr.add_node(FAdd, parent, 1)
-            hugr.add_link(self.wire.out_port(), add.inp(0))
-            hugr.add_link(angle.out_port(), add.inp(1))
+            op = FSub if negate else FAdd
+            node = hugr.add_node(op, parent, 1)
+            hugr.add_link(self.wire.out_port(), node.inp(0))
+            hugr.add_link(angle.out_port(), node.inp(1))
             return DynamicPhaseAccumulator(
-                add.out(0), self.static_angle, self.force_dynamic
+                node.out(0), self.static_angle, self.force_dynamic
             )
 
     def to_wire(self, parent: Node, hugr: Hugr) -> Wire:
@@ -119,7 +133,7 @@ class PhaseFolder:
     ) -> PhaseAccumulator:
         parent = self.hugr[phase.node].parent
         remove_gate(phase.node, self.hugr)
-        return acc.add_phase(phase.angle, self.hugr, parent)
+        return acc.add_phase(phase.angle, self.hugr, parent, negate=bool(phase.parity))
 
     @remove_and_acc.register
     def _remove_and_acc_loop_hoisted_phase(
@@ -210,7 +224,7 @@ class PhaseFolder:
 def gates_from_angle(angle: Fraction) -> list[ops.Op] | None:
     if angle.denominator == 1:
         if angle.numerator % 2 == 0:
-            return [ops.Noop]
+            return [ops.Noop(tys.Qubit)]
         else:
             return [PauliX]
     elif angle.denominator == 2:
