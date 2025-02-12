@@ -117,7 +117,7 @@ class Analysis:
 
     def add_simple_phase(self, q: QubitId, loc: Node) -> None:
         eqn = self.equation[q, :-1]
-        parity = self.equation[q, 0]
+        parity = self.equation[q, -1]
         self.phases[as_tuple(eqn)].append(SimplePhase(loc, parity))
 
     def apply_quantum_op(self, op: str, qs: list[QubitId], loc: Node) -> list[QubitId]:
@@ -129,7 +129,7 @@ class Analysis:
             case "Reset", [q]:
                 self.equation[q] = 0
             case "X", [q]:
-                self.equation[q, -1] += 1
+                self.equation[q, -1] += GF2(1)
             case "CX", [q1, q2]:
                 self.equation[q2] += self.equation[q1]
             case "T", [q]:
