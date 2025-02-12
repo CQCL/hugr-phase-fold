@@ -1,34 +1,22 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterator
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import TypeAlias, NamedTuple
-
-from galois import GF2
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
+from galois import GF2
+from hugr import Hugr, Node, Wire, ops
+from hugr.ops import Op
 
-from hugr import Node, Hugr, Wire, OutPort
-from hugr import ops, tys
-
-from hugr.build.dfg import DfBase
-
-from tket2_exts import quantum as quantum_ext
-
-from hugr_phase_fold.util import outgoing_qubits, incoming_qubits, toposort
-
-quantum = quantum_ext()
+from hugr_phase_fold.util import incoming_qubits, outgoing_qubits, toposort
 
 
 QubitId: TypeAlias = int
-
-
 HashableGF2Vec = tuple[bool, ...]
 
 
-#: A phase
 Phase: TypeAlias = "SimplePhase | LoopHoistedPhase"
 
 
@@ -69,22 +57,27 @@ class Analysis:
 
     nested_analysis: dict[Node, Analysis]
 
-    hugr: Hugr
+    hugr: Hugr[Op]
 
     num_qubits: int
     num_tmps: int
 
-    def __init__(self, num_qubits: int, hugr: Hugr):
+    def __init__(self, num_qubits: int, hugr: Hugr[Op]):
         self.num_qubits = num_qubits
         self.num_tmps = 0
         self.hugr = hugr
         # Initialise as [ I | 0 ], i.e. `x_i' = x_i` for all i
-        self.equation = np.hstack((GF2.Identity(num_qubits), GF2.Zeros((num_qubits, 1))))
+        self.equation = np.hstack(
+            (
+                GF2.Identity(num_qubits),
+                GF2.Zeros((num_qubits, 1)),
+            )
+        )
         self.phases = defaultdict(list)
         self.nested_analysis = {}
 
     @staticmethod
-    def run(hugr: Hugr, parent: Node) -> tuple[Analysis, list[QubitId]]:
+    def run(hugr: Hugr[Op], parent: Node) -> tuple[Analysis, list[QubitId]]:
         inp, *_ = hugr.children(parent)
         qs = list(range(len(list(outgoing_qubits(inp, hugr)))))
         analysis = Analysis(len(qs), hugr)
@@ -149,8 +142,8 @@ class Analysis:
     def apply_dfg(self, qs: list[QubitId], parent: Node) -> list[QubitId]:
         hugr = self.hugr
         inp, *_ = hugr.children(parent)
-        id_of = dict(zip(outgoing_qubits(inp, hugr), qs))
-        wire_of = dict(zip(qs, outgoing_qubits(inp, hugr)))
+        id_of = dict(zip(outgoing_qubits(inp, hugr), qs, strict=False))
+        wire_of = dict(zip(qs, outgoing_qubits(inp, hugr), strict=False))
 
         for node in toposort(hugr, parent):
             in_ids = [id_of[wire] for wire in incoming_qubits(node, hugr)]
@@ -164,7 +157,9 @@ class Analysis:
                     outputs = in_ids
 
             # Update tracked wires
-            for out_wire, out_id in zip(outgoing_qubits(node, hugr), out_ids):
+            for out_wire, out_id in zip(
+                outgoing_qubits(node, hugr), out_ids, strict=False
+            ):
                 id_of[out_wire] = out_id
                 wire_of[out_id] = out_wire
 
@@ -210,16 +205,25 @@ class Analysis:
         # TODO: Replace with numpy magic
         missing_qubits = [q for q in range(self.num_qubits) if q not in qs]
         num_rows = summary.rel.shape[0]
-        summary_full = GF2.Zeros((num_rows + len(missing_qubits), 2 * self.num_qubits + 1))
+        summary_full = GF2.Zeros(
+            (
+                num_rows + len(missing_qubits),
+                2 * self.num_qubits + 1,
+            )
+        )
         for i in range(num_rows):
             cols = qs + [self.num_qubits + q for q in qs] + [-1]
             summary_full[i, cols] = summary.rel[i]
         for i, q in enumerate(missing_qubits):
-            summary_full[num_rows + i, q] = summary_full[num_rows + i, self.num_qubits + q] = 1
+            summary_full[num_rows + i, q] = summary_full[
+                num_rows + i, self.num_qubits + q
+            ] = 1
 
         # Fast-forward the current state with the summary. This may introduce new
         # temporary variables into the current state.
-        self.equation = self.to_domain().compose_ff(Domain(summary_full, self.num_qubits))
+        self.equation = self.to_domain().compose_ff(
+            Domain(summary_full, self.num_qubits)
+        )
 
         # Update previous stored phase equations to include the new temporaries
         # TODO: We're assume that we only added new temporaries and none were removed.
@@ -227,7 +231,7 @@ class Analysis:
         phases_full = defaultdict(list)
         for eqn, phases in self.phases.items():
             eqn_full = GF2.Zeros(self.equation.shape[1] - 1)
-            eqn_full[:len(eqn)] = eqn
+            eqn_full[: len(eqn)] = eqn
             phases_full[as_tuple(eqn_full)] = phases
         self.phases = phases_full
 
@@ -299,7 +303,12 @@ class Domain:
         # Where the projection is over the left block. See bottom of p. 14.
         assert self.dim == other.dim
         a, b = self.rel, other.rel
-        block = np.hstack((np.vstack((a, b)), np.vstack((a, GF2.Zeros((b.shape[0], a.shape[1]))))))
+        block = np.hstack(
+            (
+                np.vstack((a, b)),
+                np.vstack((a, GF2.Zeros((b.shape[0], a.shape[1])))),
+            )
+        )
         return Domain(project(block, 0, self.dim), self.num_qubits)
 
     def compose(self, other: Domain) -> Domain:
@@ -419,11 +428,11 @@ class Domain:
         assert self.rel.shape[0] == self.num_qubits
         top = np.hstack((self.post, self.tmp, self.pre, self.c))
         bot = GF2.Zeros((1, self.dim))
-        bot[:, :self.num_qubits] = eqn
+        bot[:, : self.num_qubits] = eqn
         block = np.vstack((top, bot)).row_reduce()
         new_eqn = (
-            block[-1, -self.num_qubits - 1:-1],
-            block[-1, self.num_qubits:-self.num_qubits - 1]
+            block[-1, -self.num_qubits - 1 : -1],
+            block[-1, self.num_qubits : -self.num_qubits - 1],
         )
         return np.concatenate(new_eqn), block[-1, -1]
 

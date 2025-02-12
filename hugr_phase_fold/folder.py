@@ -5,19 +5,18 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Protocol
 
-from hugr import Wire, Hugr, Node, ops, tys
+from hugr import Hugr, Node, Wire, ops, tys
 from hugr.std.float import FLOAT_OPS_EXTENSION, FLOAT_T
+from tket2.circuit.build import CX, OneQbGate, PauliX, Rz
 
-from hugr_phase_fold.analysis import Phase, SimplePhase, LoopHoistedPhase, Analysis
+from hugr_phase_fold.analysis import Analysis, LoopHoistedPhase, Phase, SimplePhase
 from hugr_phase_fold.util import (
+    insert_gate,
     load_float_const,
+    outgoing_qubits,
     remove_gate,
     replace_gate,
-    outgoing_qubits,
-    insert_gate,
 )
-
-from tket2.circuit.build import Rz, CX, PauliX, OneQbGate
 
 S = OneQbGate("S")
 Sdg = OneQbGate("Sdg")

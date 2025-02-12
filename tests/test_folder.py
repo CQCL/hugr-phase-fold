@@ -1,13 +1,10 @@
-import numpy as np
 
-from galois import GF2
-from tket2.circuit.build import CircBuild, CX, H, QAlloc, QFree, OneQbGate, PauliX, Rz
+from hugr import Hugr, ops, tys, val
 from hugr.build.dfg import Dfg
-from hugr import tys, val, ops, Hugr
 from hugr.hugr.render import DotRenderer
+from tket2.circuit.build import CX, PauliX, QAlloc, QFree, Rz
 
-
-from hugr_phase_fold.folder import PhaseFolder, S, T, FAdd, FSub
+from hugr_phase_fold.folder import FAdd, FSub, PhaseFolder, S, T
 
 
 def run(hugr: Hugr, request, export: bool):
@@ -35,11 +32,11 @@ def gate_count(hugr: Hugr, gate: ops.Custom | ops.ExtOp):
 
 def test_noop_loop(request):
     circ = Dfg(tys.Qubit)
-    q, = circ.inputs()
+    (q,) = circ.inputs()
     q = circ.add_op(T, q)
     with circ.add_tail_loop([], [q]) as loop:
         loop.set_outputs(loop.load(val.TRUE), *loop.inputs())
-    q, = loop.outputs()
+    (q,) = loop.outputs()
     q = circ.add_op(T, q)
     circ.set_outputs(q)
 
@@ -88,14 +85,14 @@ def test_swap_loop(request):
 
 def test_ancilla_loop(request):
     circ = Dfg(tys.Qubit)
-    q, = circ.inputs()
+    (q,) = circ.inputs()
     q = circ.add_op(T, q)
     with circ.add_tail_loop([], [q]) as loop:
-        q, = loop.inputs()
+        (q,) = loop.inputs()
         loop.add_op(QFree, q)
         q = loop.add_op(QAlloc)
         loop.set_outputs(loop.load(val.TRUE), q)
-    q, = loop.outputs()
+    (q,) = loop.outputs()
     q = circ.add_op(T, q)
     circ.set_outputs(q)
 
@@ -106,15 +103,15 @@ def test_ancilla_loop(request):
 
 def test_ancilla_zero(request):
     circ = Dfg(tys.Qubit)
-    q, = circ.inputs()
+    (q,) = circ.inputs()
     q = circ.add_op(T, q)
     with circ.add_tail_loop([], [q]) as loop:
-        q, = loop.inputs()
+        (q,) = loop.inputs()
         tmp = loop.add_op(QAlloc)
         tmp, q = loop.add_op(CX, tmp, q)
         loop.add_op(QFree, tmp)
         loop.set_outputs(loop.load(val.TRUE), q)
-    q, = loop.outputs()
+    (q,) = loop.outputs()
     q = circ.add_op(T, q)
     circ.set_outputs(q)
 
@@ -124,13 +121,13 @@ def test_ancilla_zero(request):
 
 def test_hoist_loop_basic(request):
     circ = Dfg(tys.Qubit)
-    q, = circ.inputs()
+    (q,) = circ.inputs()
     q = circ.add_op(T, q)
     with circ.add_tail_loop([], [q]) as loop:
-        q, = loop.inputs()
+        (q,) = loop.inputs()
         q = loop.add_op(T, q)
         loop.set_outputs(loop.load(val.TRUE), q)
-    q, = loop.outputs()
+    (q,) = loop.outputs()
     circ.set_outputs(q)
 
     run(circ.hugr, request, export=True)
@@ -185,17 +182,17 @@ def test_hoist_loop_no_repeat(request):
 
 def test_hoist_loop_nested(request):
     circ = Dfg(tys.Qubit)
-    q, = circ.inputs()
+    (q,) = circ.inputs()
     q = circ.add_op(T, q)
     with circ.add_tail_loop([], [q]) as loop:
-        q, = loop.inputs()
+        (q,) = loop.inputs()
         q = loop.add_op(T, q)
         with loop.add_tail_loop([], [q]) as inner_loop:
-            q, = inner_loop.inputs()
+            (q,) = inner_loop.inputs()
             q = inner_loop.add_op(T, q)
             inner_loop.set_outputs(inner_loop.load(val.TRUE), q)
         loop.set_outputs(loop.load(val.TRUE), *inner_loop.outputs())
-    q, = loop.outputs()
+    (q,) = loop.outputs()
     circ.set_outputs(q)
 
     run(circ.hugr, request, export=True)
@@ -210,10 +207,10 @@ def test_hoist_loop_partial(request):
     q1 = circ.add_op(T, q1)
     q2 = circ.add_op(T, q2)
     with circ.add_tail_loop([], [q1]) as loop:
-        q1, = loop.inputs()
+        (q1,) = loop.inputs()
         q1 = loop.add_op(T, q1)
         loop.set_outputs(loop.load(val.TRUE), q1)
-    q1, = loop.outputs()
+    (q1,) = loop.outputs()
     circ.set_outputs(q1, q2)
 
     run(circ.hugr, request, export=True)
@@ -243,18 +240,17 @@ def test_hoist_loop_fastforward(request):
 
 def test_hoist_loop_parity(request):
     circ = Dfg(tys.Qubit)
-    q, = circ.inputs()
+    (q,) = circ.inputs()
     q = circ.add_op(PauliX, q)
     q = circ.add_op(T, q)
     with circ.add_tail_loop([], [q]) as loop:
-        q, = loop.inputs()
+        (q,) = loop.inputs()
         q = loop.add_op(T, q)
         loop.set_outputs(loop.load(val.TRUE), q)
-    q, = loop.outputs()
+    (q,) = loop.outputs()
     circ.set_outputs(q)
 
     run(circ.hugr, request, export=True)
     assert gate_count(circ.hugr, T) == 0
     assert gate_count(circ.hugr, Rz) == 1
     assert gate_count(circ.hugr, FSub) == 1
-
