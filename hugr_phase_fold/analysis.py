@@ -158,7 +158,7 @@ class Analysis:
                 case ops.Custom(extension="tket2.quantum", op_name=name):
                     out_ids = self.apply_quantum_op(name, in_ids, node)
                 case ops.TailLoop():
-                    out_ids = self.apply_loop(node, qs)
+                    out_ids = self.apply_loop(node, in_ids)
                 case ops.Output():
                     outputs = in_ids
 

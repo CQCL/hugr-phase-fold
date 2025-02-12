@@ -145,7 +145,8 @@ class PhaseFolder:
         if isinstance(acc, DynamicPhaseAccumulator):
             acc_wire = acc.wire
         else:
-            acc_wire = load_float_const(0, loop.parent, self.hugr)
+            assert isinstance(acc, StaticPhaseAccumulator)
+            acc_wire = load_float_const(float(acc.angle), loop.parent, self.hugr)
 
         # Add it as an extra input to the loop
         assert isinstance(loop.op, ops.TailLoop)
@@ -171,8 +172,7 @@ class PhaseFolder:
         self.hugr.add_link(nested_acc.wire.out_port(), out_node.inp(num_vars))
         acc_wire = phase.loop_node.out(num_vars - 1)
 
-        static_angle = acc.angle if isinstance(acc, StaticPhaseAccumulator) else 0
-        return DynamicPhaseAccumulator(acc_wire, static_angle)
+        return DynamicPhaseAccumulator(acc_wire)
 
     @functools.singledispatchmethod
     def replace_with_acc(self, phase: Phase, acc: PhaseAccumulator) -> None:
