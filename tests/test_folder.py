@@ -254,3 +254,49 @@ def test_hoist_loop_parity(request):
     assert gate_count(circ.hugr, T) == 0
     assert gate_count(circ.hugr, Rz) == 1
     assert gate_count(circ.hugr, FSub) == 1
+
+
+def test_conditional_id(request):
+    circ = Dfg(tys.Qubit, tys.Qubit)
+    q1, q2 = circ.inputs()
+    q1 = circ.add_op(T, q1)
+    q2 = circ.add_op(T, q2)
+    with circ.add_conditional(circ.load(val.TRUE), q1, q2) as cond:
+        with cond.add_case(0) as case:
+            q1, q2 = case.inputs()
+            case.set_outputs(q1, q2)
+        with cond.add_case(1) as case:
+            q1, q2 = case.inputs()
+            case.set_outputs(q1, q2)
+    q1, q2 = cond.outputs()
+    q1 = circ.add_op(T, q1)
+    q2 = circ.add_op(T, q2)
+    circ.set_outputs(q1, q2)
+
+    run(circ.hugr, request, export=True)
+    assert gate_count(circ.hugr, T) == 0
+    assert gate_count(circ.hugr, S) == 2
+
+
+def test_conditional_swap(request):
+    circ = Dfg(tys.Qubit, tys.Qubit)
+    q1, q2 = circ.inputs()
+    q1, q2 = circ.add_op(CX, q1, q2)
+    q2 = circ.add_op(T, q2)
+    q1, q2 = circ.add_op(CX, q1, q2)
+    with circ.add_conditional(circ.load(val.TRUE), q1, q2) as cond:
+        with cond.add_case(0) as case:
+            q1, q2 = case.inputs()
+            case.set_outputs(q2, q1)
+        with cond.add_case(1) as case:
+            q1, q2 = case.inputs()
+            case.set_outputs(q1, q2)
+    q1, q2 = cond.outputs()
+    q1, q2 = circ.add_op(CX, q1, q2)
+    q1 = circ.add_op(T, q1)
+    q2 = circ.add_op(T, q2)
+    circ.set_outputs(q1, q2)
+
+    run(circ.hugr, request, export=True)
+    assert gate_count(circ.hugr, T) == 1
+    assert gate_count(circ.hugr, S) == 1

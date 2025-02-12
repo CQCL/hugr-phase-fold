@@ -188,6 +188,26 @@ class Domain:
         )
         return np.concatenate(new_eqn), block[-1, -1]
 
+    def embed_into(self, total_num_qubits: int, current_qubits: list[int]) -> Domain:
+        """Embeds this relation into a space with more qubits.
+
+        Here, `current_qubits` is a mapping from our current qubits to their new indices
+        in the larger space.
+        """
+        assert len(current_qubits) == self.num_qubits
+        assert total_num_qubits >= self.num_qubits
+        missing_qubits = [q for q in range(total_num_qubits) if q not in current_qubits]
+        num_rows = self.rel.shape[0]
+        full_rel = GF2.Zeros((num_rows + len(missing_qubits), 2 * total_num_qubits + 1))
+        cols = current_qubits + [total_num_qubits + q for q in current_qubits] + [-1]
+        # TODO: Replace with numpy magic
+        for i in range(num_rows):
+            full_rel[i, cols] = self.rel[i]
+        for i, q in enumerate(missing_qubits):
+            full_rel[num_rows + i, q] = 1
+            full_rel[num_rows + i, total_num_qubits + q] = 1
+        return Domain(full_rel, total_num_qubits)
+
 
 def project(a: GF2, start: int, stop: int) -> GF2:
     """Projects a chunk of variables (i.e. columns) out of the relation."""

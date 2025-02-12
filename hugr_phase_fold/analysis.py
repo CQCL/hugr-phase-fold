@@ -119,6 +119,16 @@ class Analysis:
         parity = self.equation[q, -1]
         self.phases[as_tuple(eqn)].append(SimplePhase(loc, parity, angle))
 
+    def pad_phases(self):
+        """Updates the phases to the current vocabulary of variables by padding with
+        zeros."""
+        phases_full = defaultdict(list)
+        for eqn, phases in self.phases.items():
+            eqn_full = GF2.Zeros(self.equation.shape[1] - 1)
+            eqn_full[: len(eqn)] = eqn
+            phases_full[as_tuple(eqn_full)] = phases
+        self.phases = phases_full
+
     def apply_quantum_op(self, op: str, qs: list[QubitId], loc: Node) -> list[QubitId]:
         match op, qs:
             case "QAlloc", []:
@@ -152,6 +162,8 @@ class Analysis:
             match hugr[node].op:
                 case ops.Custom(extension="tket2.quantum", op_name=name):
                     out_ids = self.apply_quantum_op(name, in_ids, node)
+                case ops.Conditional():
+                    out_ids = self.apply_conditional(node, in_ids)
                 case ops.TailLoop():
                     out_ids = self.apply_loop(node, in_ids)
                 case ops.Output():
@@ -165,6 +177,58 @@ class Analysis:
                 wire_of[out_id] = out_wire
 
         return outputs
+
+    def apply_conditional(self, node: Node, qs: list[QubitId]) -> list[QubitId]:
+        cases, case_outs = [], []
+        summary = None
+        for case_node in self.hugr.children(node):
+            case, out = Analysis.run(self.hugr, case_node)
+            cases.append(case)
+            case_outs.append(out)
+
+            # Apply permutation such that the outputted qubits are in the front in order
+            # and discarded ones at the end
+            discarded = [q for q in range(case.num_qubits) if q not in out]
+            case.equation[:] = case.equation[out + discarded]
+
+            # Project the discarded qubits and temporaries
+            d = case.to_domain().forget_ancillas(len(discarded))
+            d = d.project_tmps()
+
+            # Update summary by joining with this branch
+            if summary is not None:
+                summary = summary.join(d)
+            else:
+                summary = d
+
+            # Check for phase gates that only depend on qubits that pass through the
+            # case (i.e. no dependency on measured or freshly allocated qubits).
+            # Also, we need to make sure that those qubits are passed through *all* of
+            # the conditionals to allow safe hoisting!
+            # TODO
+
+        # We might need to create more qubit variables on top-level to handle all the
+        # stuff that this conditional returns
+        outs = []
+        for q in case_outs[0]:
+            if q in qs:
+                outs.append(q)
+            else:
+                outs.append(self.new_qubit())
+
+        # Expand summary to the full set of qubits
+        summary = summary.embed_into(self.num_qubits, qs)
+
+        # Fast-forward the current state with the summary. This may introduce new
+        # temporary variables into the current state.
+        self.equation = self.to_domain().compose_ff(summary)
+
+        # Update previous stored phase equations to include the new temporaries
+        # TODO: We're assume that we only added new temporaries and none were removed.
+        #   Is that a safe assumption??
+        self.pad_phases()
+
+        return outs
 
     def apply_loop(self, node: Node, qs: list[QubitId]) -> list[QubitId]:
         loop, continue_vars = Analysis.run(self.hugr, node)
@@ -202,39 +266,17 @@ class Analysis:
         # TODO: Consider the starting state when computing the Kleene closure?
         summary = d.project_tmps().kleene_closure()
 
-        # Expand vocabulary to the full set of qubits
-        # TODO: Replace with numpy magic
-        missing_qubits = [q for q in range(self.num_qubits) if q not in qs]
-        num_rows = summary.rel.shape[0]
-        summary_full = GF2.Zeros(
-            (
-                num_rows + len(missing_qubits),
-                2 * self.num_qubits + 1,
-            )
-        )
-        for i in range(num_rows):
-            cols = qs + [self.num_qubits + q for q in qs] + [-1]
-            summary_full[i, cols] = summary.rel[i]
-        for i, q in enumerate(missing_qubits):
-            summary_full[num_rows + i, q] = summary_full[
-                num_rows + i, self.num_qubits + q
-            ] = 1
+        # Expand summary to the full set of qubits
+        summary = summary.embed_into(self.num_qubits, qs)
 
         # Fast-forward the current state with the summary. This may introduce new
         # temporary variables into the current state.
-        self.equation = self.to_domain().compose_ff(
-            Domain(summary_full, self.num_qubits)
-        )
+        self.equation = self.to_domain().compose_ff(summary)
 
         # Update previous stored phase equations to include the new temporaries
         # TODO: We're assume that we only added new temporaries and none were removed.
         #   Is that a safe assumption??
-        phases_full = defaultdict(list)
-        for eqn, phases in self.phases.items():
-            eqn_full = GF2.Zeros(self.equation.shape[1] - 1)
-            eqn_full[: len(eqn)] = eqn
-            phases_full[as_tuple(eqn_full)] = phases
-        self.phases = phases_full
+        self.pad_phases()
 
         # Add hoisted phases
         d = self.to_domain()
