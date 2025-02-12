@@ -223,20 +223,23 @@ class Analysis:
         # Update previous stored phase equations to include the new temporaries
         # TODO: We're assume that we only added new temporaries and none were removed.
         #   Is that a safe assumption??
-        phases_ff = defaultdict(list)
+        phases_full = defaultdict(list)
         for eqn, phases in self.phases.items():
-            eqn_ff = GF2.Zeros(self.equation.shape[1] - 1)
-            eqn_ff[:len(eqn)] = eqn
-            phases_ff[as_tuple(eqn_ff)] = phases
-        self.phases = phases_ff
+            eqn_full = GF2.Zeros(self.equation.shape[1] - 1)
+            eqn_full[:len(eqn)] = eqn
+            phases_full[as_tuple(eqn_full)] = phases
+        self.phases = phases_full
 
         # Add hoisted phases
+        d = self.to_domain()
         for eqn in hoistable:
             # Remove the equation from the inner loop context
             phases = loop.phases.pop(eqn)
             # Express the equation in terms of the global vocabulary
-            eqn_ff = GF2.Zeros(self.equation.shape[1] - 1)
-            eqn_ff[:len(eqn)] = eqn
+            eqn_full = GF2.Zeros(self.num_qubits + self.num_tmps)
+            eqn_full[qs] = eqn
+            # Canonicalize the equation w.r.t the outer relation
+            eqn_ff, parity = d.canonicalize(eqn_full)
             self.phases[as_tuple(eqn_ff)].append(LoopHoistedPhase(node, phases, eqn))
 
         # Finally, store the nested analysis with the remaining unhoisted phases
@@ -323,6 +326,14 @@ class Domain:
         block = np.vstack((np.hstack(top), np.hstack(bot)))
         return Domain(project(block, 0, self.num_qubits), self.num_qubits)
 
+    def kleene_closure(self) -> Domain:
+        a = self
+        while True:
+            b = a.join(a.compose(self))
+            if np.array_equal(a.rel, b.rel):
+                return b
+            a = b
+
     def compose_ff(self, other: Domain) -> GF2:
         """Fast-forward sequential composition of relations where all temporaries have
         been projected out of `other`.
@@ -391,13 +402,27 @@ class Domain:
         y = y[:, np.any(y != 0, axis=0)]
         return np.hstack((x, y, c))
 
-    def kleene_closure(self) -> Domain:
-        a = self
-        while True:
-            b = a.join(a.compose(self))
-            if np.array_equal(a.rel, b.rel):
-                return b
-            a = b
+    def canonicalize(self, eqn: GF2) -> tuple[GF2, bool]:
+        """Canonicalizes a functional represented by a vector with respect to the
+        current relation.
+        """
+        # This works by performing the row reduction
+        #
+        #    [ A_Post | A_Tmp | A_Pre | c ]  ->  [ A_Post | A_Tmp    | A_Pre    | c ]
+        #    [    Eqn |     0 |     0 | 0 ]      [      0 | Eqn'_Tmp | Eqn'_Pre | p ]
+        #
+        # and returning [ Eqn'_Pre | Eqn'_Tmp ] together with the new parity p. In the
+        # paper, thisoperations is referred to as `reduce` (see p. 18).
+        assert self.rel.shape[0] == self.num_qubits
+        top = np.hstack((self.post, self.tmp, self.pre, self.c))
+        bot = GF2.Zeros((1, self.dim))
+        bot[:, :self.num_qubits] = eqn
+        block = np.vstack((top, bot)).row_reduce()
+        new_eqn = (
+            block[-1, -self.num_qubits - 1:-1],
+            block[-1, self.num_qubits:-self.num_qubits - 1]
+        )
+        return np.concatenate(new_eqn), block[0, -1]
 
 
 def project(a: GF2, start: int, stop: int) -> GF2:
