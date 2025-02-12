@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import TypeAlias, NamedTuple
 
 from galois import GF2
@@ -15,6 +16,8 @@ from hugr import ops, tys
 from hugr.build.dfg import DfBase
 
 from tket2_exts import quantum as quantum_ext
+
+from hugr_phase_fold.util import outgoing_qubits, incoming_qubits, toposort
 
 quantum = quantum_ext()
 
@@ -32,6 +35,7 @@ Phase: TypeAlias = "SimplePhase | LoopHoistedPhase"
 class SimplePhase(NamedTuple):
     node: Node
     parity: bool
+    angle: Fraction | Wire
 
 
 class LoopHoistedPhase(NamedTuple):
@@ -115,10 +119,10 @@ class Analysis:
         self.num_tmps += 1
         return self.num_qubits + self.num_tmps - 1
 
-    def add_simple_phase(self, q: QubitId, loc: Node) -> None:
+    def add_simple_phase(self, q: QubitId, loc: Node, angle: Fraction | Wire) -> None:
         eqn = self.equation[q, :-1]
         parity = self.equation[q, -1]
-        self.phases[as_tuple(eqn)].append(SimplePhase(loc, parity))
+        self.phases[as_tuple(eqn)].append(SimplePhase(loc, parity, angle))
 
     def apply_quantum_op(self, op: str, qs: list[QubitId], loc: Node) -> list[QubitId]:
         match op, qs:
@@ -133,7 +137,7 @@ class Analysis:
             case "CX", [q1, q2]:
                 self.equation[q2] += self.equation[q1]
             case "T", [q]:
-                self.add_simple_phase(q, loc)
+                self.add_simple_phase(q, loc, Fraction(1, 4))
             case _, qs:
                 for q in qs:
                     y = self.new_tmp()
@@ -422,27 +426,6 @@ def project_columns(a: GF2, cols: list[int]) -> GF2:
     # Any rows where one of the projection columns is non-zero can be removed (since
     # those rows can be solved by fixing one of the projected values)
     return a[np.all(a[:, : len(cols)] == 0, axis=1), len(cols) :]
-
-
-def toposort(hugr: Hugr, parent: Node) -> Iterator[Node]:
-    queue = {node for node in hugr.children(parent) if hugr.num_incoming(node) == 0}
-    visited = set()
-    while queue:
-        node = queue.pop()
-        yield node
-        visited.add(node)
-        for _, succs in hugr.outgoing_links(node):
-            for succ in succs:
-                if all(pred.node in visited for _, [pred] in hugr.incoming_links(succ.node)):
-                    queue.add(succ.node)
-
-
-def incoming_qubits(node: Node, hugr: Hugr) -> Iterator[Wire]:
-    return (wire for _, [wire] in hugr.incoming_links(node) if hugr.port_type(wire) == tys.Qubit)
-
-
-def outgoing_qubits(node: Node, hugr: Hugr) -> Iterator[Wire]:
-    return (wire for (wire, _) in hugr.outgoing_links(node) if hugr.port_type(wire) == tys.Qubit)
 
 
 def as_tuple(xs: GF2) -> tuple[bool, ...]:

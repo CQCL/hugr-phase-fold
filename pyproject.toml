@@ -58,8 +58,7 @@ show_error_codes = true
 testpaths = ["tests"]
 
 [tool.ruff]
-target-version = "py39"
-line-length = 120
+target-version = "py310"
 fix = true
 
 [tool.ruff.lint]
