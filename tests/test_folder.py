@@ -204,6 +204,30 @@ def test_hoist_loop_nested(request):
     assert gate_count(circ.hugr, FAdd) == 2
 
 
+def test_hoist_loop_nested_cx(request):
+    circ = Dfg(tys.Qubit, tys.Qubit)
+    q1, q2 = circ.inputs()
+    q2 = circ.add_op(PauliX, q2)
+    with circ.add_tail_loop([], [q1, q2]) as loop:
+        q1, q2 = loop.inputs()
+        q1, q2 = loop.add_op(CX, q1, q2)
+        with loop.add_tail_loop([], [q1, q2]) as inner_loop:
+            q1, q2 = inner_loop.inputs()
+            q2 = inner_loop.add_op(T, q2)
+            inner_loop.set_outputs(inner_loop.load(val.TRUE), q1, q2)
+        q1, q2 = inner_loop.outputs()
+        q1, q2 = loop.add_op(CX, q1, q2)
+        loop.set_outputs(loop.load(val.TRUE), q1, q2)
+    q1, q2 = loop.outputs()
+    circ.set_outputs(q1, q2)
+
+    run(circ.hugr, request, export=True)
+    assert gate_count(circ.hugr, T) == 0
+    assert gate_count(circ.hugr, Rz) == 1
+    assert gate_count(circ.hugr, FAdd) == 0
+    assert gate_count(circ.hugr, FSub) == 1
+
+
 def test_hoist_loop_partial(request):
     circ = Dfg(tys.Qubit, tys.Qubit)
     q1, q2 = circ.inputs()
