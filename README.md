@@ -158,10 +158,10 @@ do {
 
 float acc = 0.0f;
 do {
-    cx(q1, q2);
+
     acc += 0.25f;
     cx(q2, q3);
-    cx(q1, q2);
+
 } while (...);
 cx(q1, q2);
 rz(q, acc + angle);
@@ -175,6 +175,7 @@ cx(q1, q2);
 
 ```c
 x(q2);
+
 do {
     cx(q1, q2);
     do {
@@ -191,6 +192,7 @@ do {
 <td>
     
 ```c
+x(q2);
 float acc = 0.0f;
 do {
 
@@ -200,7 +202,7 @@ do {
 
 } while (...);
 cx(q1, q2);
-rz(q, acc + 0.25f);
+rz(q, acc);
 cx(q1, q2);
 ```
 </td>
@@ -251,16 +253,16 @@ folder.run(hugr.root)
       cx(tmp, q);
       t(q);
   } while (!measure(tmp));
-  # Loop is only repeated if tmp was |0>, so the t only has effect a single time,
-  # so it could be hoisted out
+  // Loop is only repeated if tmp was |0>, so the t only has effect a single time,
+  // so it could be hoisted out
   ```
 * Take intitial state into account when computing Kleene closure instead of only doing it during fast-forwarding:
   ```c
   q2 = qubit();
   cx(q1, q2);  # q1 and q2 have same parity
   do {
-      # Those two Ts could be merged, but we don't since we don't know this
-      # while computing the summary...
+      // Those two Ts could be merged, but we don't since we don't know this
+      // while computing the summary...
       t(q1);
       t(q2);
   } while (...);
