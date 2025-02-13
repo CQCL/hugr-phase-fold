@@ -1,7 +1,6 @@
 [project]
 name = "hugr-phase-fold"
 version = "0.0.1"
-description = "This is a template repository for Python projects that use uv for their dependency management."
 authors = [{ name = "Mark Koch", email = "mark.koch@quantinuum.com" }]
 readme = "README.md"
 keywords = ['python']
@@ -22,11 +21,6 @@ dependencies = [
     "tket2-exts>=0.3.0",
     "tket2>=0.6.0",
 ]
-
-[project.urls]
-Homepage = "https://mark-koch.github.io/hugr-phase-fold/"
-Repository = "https://github.com/mark-koch/hugr-phase-fold"
-Documentation = "https://mark-koch.github.io/hugr-phase-fold/"
 
 [dependency-groups]
 dev = [
