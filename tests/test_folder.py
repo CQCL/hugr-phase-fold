@@ -68,19 +68,22 @@ def test_cx_loop(request):
 def test_swap_loop(request):
     circ = Dfg(tys.Qubit, tys.Qubit)
     q1, q2 = circ.inputs()
+    q1, q2 = circ.add_op(CX, q1, q2)
     q1 = circ.add_op(T, q1)
     q2 = circ.add_op(T, q2)
+    q1, q2 = circ.add_op(CX, q1, q2)
     with circ.add_tail_loop([], [q1, q2]) as loop:
         q1, q2 = loop.inputs()
         loop.set_outputs(loop.load(val.TRUE), q2, q1)
     q1, q2 = loop.outputs()
+    q1, q2 = circ.add_op(CX, q1, q2)
     q1 = circ.add_op(T, q1)
     q2 = circ.add_op(T, q2)
     circ.set_outputs(q1, q2)
 
-    # No Ts can be cancelled
     run(circ.hugr, request, export=False)
-    assert gate_count(circ.hugr, T) == 4
+    assert gate_count(circ.hugr, T) == 2
+    assert gate_count(circ.hugr, S) == 1
 
 
 def test_ancilla_loop(request):
