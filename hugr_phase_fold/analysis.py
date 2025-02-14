@@ -133,7 +133,9 @@ class Analysis:
         match op, qs:
             case "QAlloc", []:
                 return [self.new_qubit()]
-            case "Measure" | "QFree", [_]:
+            case "Measure", [q]:
+                return [q]
+            case "QFree", [_]:
                 return []
             case "Reset", [q]:
                 self.equation[q] = 0
