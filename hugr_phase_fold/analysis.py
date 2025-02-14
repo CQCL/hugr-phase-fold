@@ -131,7 +131,7 @@ class Analysis:
 
     def apply_quantum_op(self, op: str, qs: list[QubitId], loc: Node) -> list[QubitId]:
         match op, qs:
-            case "QAlloc", []:
+            case "QAlloc" | "QuregExtractIndex", []:
                 return [self.new_qubit()]
             case "Measure", [q]:
                 return [q]
@@ -162,7 +162,7 @@ class Analysis:
             in_ids = [id_of[wire] for wire in incoming_qubits(node, hugr)]
             out_ids = []
             match hugr[node].op:
-                case ops.Custom(extension="tket2.quantum", op_name=name):
+                case ops.Custom(extension="tket2.quantum" | "QPR", op_name=name):
                     out_ids = self.apply_quantum_op(name, in_ids, node)
                 case ops.Conditional():
                     out_ids = self.apply_conditional(node, in_ids)
@@ -229,6 +229,29 @@ class Analysis:
         # TODO: We're assume that we only added new temporaries and none were removed.
         #   Is that a safe assumption??
         self.pad_phases()
+
+        # Look for phases that can be hoisted out of the loop. This is only legal for
+        # phases that only depend on qubits that we can safely identify after the
+        # conditional. This is only the case for qubits that are outputted at the same
+        # index for all cases.
+        # case_outs = np.array(case_outs)
+        # static_outs = set(np.where(np.all(case_outs == case_outs[0, :], axis=0)))
+        # for i, case in enumerate(cases):
+        #     for eqn_tuple, phases in case.phases.items():
+        #         # Find variables that influence this gate (excluding the parity bit)
+        #         eqn = GF2(eqn_tuple)
+        #         (vs,) = eqn.nonzero()
+        #         # Check if it's hoistable
+        #         if all(v < case.num_qubits and v in static_outs for v in vs):
+        #             # Express the equation in terms of the global vocabulary
+        #             eqn_full = GF2.Zeros(self.num_qubits + self.num_tmps)
+        #             eqn_full[case_outs[i]] = eqn
+        #             # Canonicalize the equation w.r.t the outer relation
+        #             eqn_ff, parity = d.canonicalize(eqn_full)
+        #             self.phases[as_tuple(eqn_ff)].append(
+        #                 LoopHoistedPhase(node, phases, eqn, parity)
+        #             )
+
 
         return outs
 
