@@ -21,7 +21,8 @@ def toposort(hugr: Hugr[OpVar], parent: Node) -> Iterator[Node]:
         for _, succs in hugr.outgoing_links(node):
             for succ in succs:
                 if all(
-                    pred.node in visited for _, [pred] in hugr.incoming_links(succ.node)
+                    pred.node in visited or hugr[pred.node].parent != hugr[succ.node].parent
+                    for _, [pred] in hugr.incoming_links(succ.node)
                 ):
                     queue.add(succ.node)
 
