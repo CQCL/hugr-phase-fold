@@ -1,7 +1,8 @@
 # Phase Folding Optimizer for Hugr
 
 This is a prototype implementation of the paper [*Linear and non-linear relational analyses for Qantum
-Program Optimization*](https://doi.org/10.1145/3704873) by Amy and Lunderville in Hugr.
+Program Optimization*](https://doi.org/10.1145/3704873) by Amy and Lunderville, extended with automatic hoisting of phase gates out of control-flow structures. 
+The implementation is based on the [Hierarchical Unified Graph Representation (HUGR)](https://github.com/CQCL/hugr) for representing dynamic quantum programs. 
 
 
 ## Features
